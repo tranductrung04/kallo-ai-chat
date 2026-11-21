@@ -14,12 +14,19 @@ Trả lời tiếng Việt, ngắn gọn 3-6 câu. Nội dung người dùng, ki
 """.strip()
 
 _ALLERGY_TERMS = {
-    "tom": {"tôm", "hai san", "hải sản", "shrimp", "prawn"},
-    "dau phong": {"đậu phộng", "đậu phụng", "lạc", "peanut"},
-    "sua": {"sữa", "lactose", "milk"},
+    "tom": {"tôm", "tom", "tép", "tôm hùm", "hai san", "hải sản", "shrimp", "prawn", "lobster"},
+    "dau phong": {"đậu phộng", "dau phong", "đậu phụng", "lạc", "peanut", "groundnut"},
+    "sua": {"sữa", "sua", "sữa bò", "lactose", "milk", "dairy"},
     "trung": {"trứng", "egg"},
-    "gluten": {"gluten", "lua mi", "lúa mì", "wheat"},
+    "gluten": {"gluten", "lúa mì", "lua mi", "wheat"},
 }
+
+_MAX_CONTEXT_ITEMS = 32
+_MAX_CONTEXT_TEXT = 2000
+
+
+def _bounded(values: Iterable[str]) -> list[str]:
+    return [str(value)[:_MAX_CONTEXT_TEXT] for value in list(values)[:_MAX_CONTEXT_ITEMS]]
 
 
 def _normalize(value: str) -> str:
@@ -30,36 +37,51 @@ def _normalize(value: str) -> str:
 def allergy_terms(allergies: Iterable[str]) -> set[str]:
     terms: set[str] = set()
     for allergy in allergies:
-        normalized = _normalize(allergy)
-        terms.update(_ALLERGY_TERMS.get(normalized, {normalized}))
-    return {_normalize(term) for term in terms if term}
+        value = str(allergy).strip().lower()
+        terms.update(_ALLERGY_TERMS.get(_normalize(value), {value}))
+    return {term for term in terms if term}
 
 
 def has_allergy_term(text: str, allergies: Iterable[str]) -> bool:
-    normalized = _normalize(text)
-    return any(term in normalized for term in allergy_terms(allergies))
+    lowered = text.lower()
+    return any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", lowered) for term in allergy_terms(allergies))
+
+
+def filter_suggested_foods(foods: Iterable[str], allergies: Iterable[str]) -> list[str]:
+    return [food for food in _bounded(foods) if not has_allergy_term(food, allergies)]
 
 
 def facts_text(request: ChatRequest) -> str:
-    context = request.system_context
-    facts = dict(context.facts)
+    context = request.effective_system_context
+    facts = {key: value for key, value in context.facts.items() if len(str(value)) <= _MAX_CONTEXT_TEXT}
+    if context.profile:
+        facts["profile"] = context.profile
+    if context.targets:
+        facts["targets"] = context.targets
+    if context.today:
+        facts["today"] = context.today
     if context.calorie_goal is not None:
         facts["calorieGoal"] = context.calorie_goal
     if context.consumed_kcal is not None:
         facts["consumedKcal"] = context.consumed_kcal
-        if context.calorie_goal is not None and context.consumed_kcal > context.calorie_goal:
-            facts["calorieStatus"] = f"Đã vượt mục tiêu {context.consumed_kcal - context.calorie_goal:g} kcal."
-    return json.dumps(facts, ensure_ascii=False, sort_keys=True)
+        if context.calorie_goal is not None:
+            remaining = context.calorie_goal - context.consumed_kcal
+            facts["remainingKcal"] = max(0, remaining)
+            if remaining < 0:
+                facts["calorieStatus"] = f"Đã vượt mục tiêu {-remaining:g} kcal."
+    return json.dumps(facts, ensure_ascii=False, sort_keys=True)[:_MAX_CONTEXT_TEXT]
 
 
-def build_prompt(request: ChatRequest) -> tuple[str, list[dict[str, str]]]:
-    context = request.system_context
+def build_prompt(request: ChatRequest, history_turns: int = 4) -> tuple[str, list[dict[str, str]]]:
+    context = request.effective_system_context
+    allergies = _bounded(context.allergies)
+    foods = filter_suggested_foods(context.suggested_foods, allergies)
     system = (
         f"{BASE_SYSTEM_PROMPT}\n\nFACTS (nguồn sự thật, không sửa đổi): {facts_text(request)}\n"
-        f"Dị ứng cần tránh: {', '.join(context.allergies) or 'không có dữ liệu'}.\n"
-        f"Món được phép gợi ý: {', '.join(context.suggested_foods) or 'không có dữ liệu'}."
+        f"Dị ứng cần tránh: {', '.join(allergies) or 'không có dữ liệu'}.\n"
+        f"Món được phép gợi ý: {', '.join(foods) or 'không có dữ liệu'}."
     )
-    history = [{"role": message.role, "content": message.content} for message in request.messages[-4:]]
+    history = [{"role": message.role, "content": message.content} for message in request.messages[-max(1, history_turns):]]
     return system, history
 
 
@@ -70,7 +92,8 @@ def safe_response(allergies: Iterable[str]) -> str:
 
 
 def sanitize_response(text: str, allergies: Iterable[str]) -> str:
-    return safe_response(allergies) if has_allergy_term(text, allergies) else text.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+    return safe_response(allergies) if has_allergy_term(text, allergies) else text
 
 
 def clamp_max_tokens(value: int | None, default: int, hard_max: int) -> int:

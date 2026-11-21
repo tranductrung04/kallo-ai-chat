@@ -19,6 +19,8 @@ class Settings:
     fallback_base_url: str | None
     fallback_api_key: str | None
     fallback_model: str | None
+    fallback_reasoning_effort: str | None
+    fallback_extra_body: dict[str, object]
     max_concurrent_generations: int
     max_queue_wait: float
     rpm_limit: int
@@ -36,14 +38,18 @@ def _optional(name: str) -> str | None:
 
 
 
-def _extra_body() -> dict[str, object]:
-    raw = os.getenv("LLM_EXTRA_BODY_JSON", "").strip()
+def _extra_body_from(name: str) -> dict[str, object]:
+    raw = os.getenv(name, "").strip()
     if not raw:
         return {}
     value = json.loads(raw)
     if not isinstance(value, dict):
-        raise ValueError("LLM_EXTRA_BODY_JSON must contain a JSON object")
+        raise ValueError(f"{name} must contain a JSON object")
     return value
+
+
+def _extra_body() -> dict[str, object]:
+    return _extra_body_from("LLM_EXTRA_BODY_JSON")
 
 
 @lru_cache
@@ -62,6 +68,8 @@ def settings() -> Settings:
         fallback_base_url=_optional("LLM_FALLBACK_BASE_URL"),
         fallback_api_key=_optional("LLM_FALLBACK_API_KEY"),
         fallback_model=_optional("LLM_FALLBACK_MODEL"),
+        fallback_reasoning_effort=_optional("LLM_FALLBACK_REASONING_EFFORT"),
+        fallback_extra_body=_extra_body_from("LLM_FALLBACK_EXTRA_BODY_JSON"),
         max_concurrent_generations=max(1, int(os.getenv("MAX_CONCURRENT_GENERATIONS", "3"))),
         max_queue_wait=max(0.0, float(os.getenv("MAX_QUEUE_WAIT_SECONDS", "10"))),
         rpm_limit=max(0, int(os.getenv("LLM_RPM_LIMIT", "0"))),

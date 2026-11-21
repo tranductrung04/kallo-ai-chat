@@ -4,7 +4,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings, settings
@@ -26,7 +26,7 @@ providers = [
     ProviderConfig("primary", config.llm_base_url, config.llm_api_key, config.llm_model, config.llm_reasoning_effort, config.llm_extra_body),
 ]
 if config.fallback_base_url and config.fallback_api_key and config.fallback_model:
-    providers.append(ProviderConfig("fallback", config.fallback_base_url, config.fallback_api_key, config.fallback_model, config.llm_reasoning_effort, config.llm_extra_body))
+    providers.append(ProviderConfig("fallback", config.fallback_base_url, config.fallback_api_key, config.fallback_model, config.fallback_reasoning_effort, config.fallback_extra_body))
 llm = LLMClient(providers, connect_timeout=config.llm_connect_timeout, first_token_timeout=config.llm_first_token_timeout, timeout=config.llm_timeout, max_retries=config.llm_max_retries, hard_max_tokens=config.hard_max_tokens)
 generation_lock = asyncio.Semaphore(config.max_concurrent_generations)
 
@@ -36,7 +36,12 @@ def error(status: int, code: str, message: str, headers: dict[str, str] | None =
 
 
 def authorized(api_key: str | None) -> bool:
-    return bool(config.api_key) and bool(api_key) and secrets.compare_digest(api_key, config.api_key)
+    if not config.api_key or not api_key:
+        return False
+    try:
+        return secrets.compare_digest(api_key.encode("utf-8"), config.api_key.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
 
 
 def llm_error_response(exc: LLMError) -> JSONResponse:
@@ -62,33 +67,44 @@ async def ready() -> JSONResponse:
 
 
 @app.post("/v1/chat")
-async def chat(payload: ChatRequest, x_internal_api_key: str | None = Header(default=None)):
-    if not authorized(x_internal_api_key):
+async def chat(request: Request, payload: ChatRequest):
+    if not authorized(request.headers.get("X-Internal-Api-Key")):
         return error(401, "unauthorized", "API key không hợp lệ.")
     try:
         await asyncio.wait_for(generation_lock.acquire(), timeout=config.max_queue_wait)
     except TimeoutError:
         return error(503, "busy", "AI đang bận, thử lại sau.", {"Retry-After": str(int(config.max_queue_wait))})
     try:
-        system, messages = build_prompt(payload)
-        if payload.stream:
+        system, messages = build_prompt(payload, config.history_turns)
+        if payload.effective_stream:
             return StreamingResponse(stream_response(payload, system, messages), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-        text = sanitize_response(await llm.complete(messages, system, clamp_max_tokens(payload.max_tokens, config.max_tokens, config.hard_max_tokens)), payload.system_context.allergies)
+        text = sanitize_response(await llm.complete(messages, system, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens)), payload.effective_system_context.allergies)
         return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]}
     except LLMError as exc:
         return llm_error_response(exc)
     finally:
-        if not payload.stream:
+        if not payload.effective_stream:
             generation_lock.release()
 
 
 async def stream_response(payload: ChatRequest, system: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
     try:
+        yield ": ping\n\n"
         buffer = ""
-        async for delta in llm.stream(messages, system, clamp_max_tokens(payload.max_tokens, config.max_tokens, config.hard_max_tokens)):
+        pending = ""
+        async for delta in llm.stream(messages, system, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens)):
             buffer += delta
-        text = sanitize_response(buffer, payload.system_context.allergies)
-        yield f"data: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
+            pending += delta
+            while "\n" in pending:
+                sentence, pending = pending.split("\n", 1)
+                if sentence.strip():
+                    yield f"event: delta\ndata: {json.dumps({'content': sentence}, ensure_ascii=False)}\n\n"
+        if pending.strip():
+            yield f"event: delta\ndata: {json.dumps({'content': pending}, ensure_ascii=False)}\n\n"
+        text = sanitize_response(buffer, payload.effective_system_context.allergies)
+        if text != buffer.strip():
+            yield f"event: replace\ndata: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
     except LLMError as exc:
         code = "llm_rate_limited" if exc.status_code == 429 else "llm_error"

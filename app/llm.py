@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import asyncio
 import json
 import random
+import re
 import time
 from typing import Any
 
@@ -58,6 +59,7 @@ class LLMClient:
         self.max_retries = max_retries
         self.hard_max_tokens = hard_max_tokens
         self._states = {provider.name: _ProviderState() for provider in providers}
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=connect_timeout))
 
     def _payload(self, provider: ProviderConfig, messages: list[dict[str, Any]], system: str, max_tokens: int, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -90,6 +92,12 @@ class LLMClient:
     async def health(self) -> bool:
         return bool(self.providers and all(provider.api_key and provider.model for provider in self.providers[:1]))
 
+    @staticmethod
+    def _clean_content(content: object) -> str:
+        if not isinstance(content, str):
+            return ""
+        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+
     async def complete(self, messages: list[dict[str, Any]], system: str, max_tokens: int) -> str:
         last_error: LLMError | None = None
         for provider in self.providers:
@@ -98,21 +106,22 @@ class LLMClient:
             for attempt in range(self.max_retries + 1):
                 response: httpx.Response | None = None
                 try:
-                    timeout = httpx.Timeout(self.timeout, connect=self.connect_timeout)
-                    async with httpx.AsyncClient(timeout=timeout) as client:
-                        response = await client.post(
+                    response = await self._client.post(
                             f"{provider.base_url}/chat/completions",
                             headers={"Authorization": f"Bearer {provider.api_key}"},
-                            json=self._payload(provider, messages, system, max_tokens, False),
-                        )
+                        json=self._payload(provider, messages, system, max_tokens, False),
+                    )
                     if response.status_code in {429, 500, 502, 503, 504}:
                         raise LLMError("provider temporarily unavailable", status_code=response.status_code, retryable=True)
                     if response.status_code in {401, 403}:
                         raise LLMError("provider authentication failed", status_code=response.status_code)
                     response.raise_for_status()
                     data = response.json()
-                    content = data["choices"][0]["message"]["content"]
-                    if not isinstance(content, str) or not content.strip():
+                    finish_reason = data["choices"][0].get("finish_reason")
+                    if finish_reason == "content_filter":
+                        raise LLMError("provider content filter")
+                    content = self._clean_content(data["choices"][0]["message"].get("content"))
+                    if not content:
                         raise LLMError("empty LLM response")
                     self._record_success(provider)
                     return content
@@ -140,43 +149,48 @@ class LLMClient:
         for provider in self.providers:
             if not self._available(provider):
                 continue
+            emitted = False
             try:
-                timeout = httpx.Timeout(self.timeout, connect=self.connect_timeout)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{provider.base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {provider.api_key}"},
-                        json=self._payload(provider, messages, system, max_tokens, True),
-                    ) as response:
-                        if response.status_code in {429, 500, 502, 503, 504}:
-                            raise LLMError("provider temporarily unavailable", status_code=response.status_code, retryable=True)
-                        if response.status_code in {401, 403}:
-                            raise LLMError("provider authentication failed", status_code=response.status_code)
-                        response.raise_for_status()
-                        first = True
-                        async for line in response.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            raw = line[5:].strip()
-                            if raw == "[DONE]":
-                                break
-                            if not raw:
-                                continue
-                            try:
-                                data = json.loads(raw)
-                            except json.JSONDecodeError:
-                                continue
-                            choices = data.get("choices") or []
-                            if not choices:
-                                continue
-                            delta = (choices[0].get("delta") or {}).get("content")
-                            if delta:
-                                first = False
-                                yield delta
-                        self._record_success(provider)
-                        return
+                request = self._client.stream(
+                    "POST",
+                    f"{provider.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    json=self._payload(provider, messages, system, max_tokens, True),
+                )
+                async with request as response:
+                    if response.status_code in {429, 500, 502, 503, 504}:
+                        raise LLMError("provider temporarily unavailable", status_code=response.status_code, retryable=True)
+                    if response.status_code in {401, 403}:
+                        raise LLMError("provider authentication failed", status_code=response.status_code)
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if raw == "[DONE]":
+                            break
+                        if not raw:
+                            continue
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        if choices[0].get("finish_reason") == "content_filter":
+                            raise LLMError("provider content filter")
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if delta:
+                            emitted = True
+                            yield delta
+                    if not emitted:
+                        raise LLMError("empty LLM stream")
+                    self._record_success(provider)
+                    return
             except (LLMError, httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
                 last_error = exc if isinstance(exc, LLMError) else LLMError("LLM stream failed", retryable=True)
                 self._record_failure(provider)
+                if emitted:
+                    break
         raise last_error or LLMError("no LLM provider available", retryable=True)
