@@ -50,7 +50,7 @@ class SystemContext(BaseModel):
 
     calorie_goal: float | None = None
     consumed_kcal: float | None = None
-    allergies: list[str] = Field(default_factory=list, max_length=32)
+    allergies: list[str] = Field(default_factory=list, max_length=16)
     suggested_foods: list[str] = Field(default_factory=list, max_length=32)
     facts: dict[str, Any] = Field(default_factory=dict)
     profile: dict[str, Any] = Field(default_factory=dict)

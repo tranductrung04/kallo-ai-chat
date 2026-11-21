@@ -19,6 +19,11 @@ def test_allergy_filter_normalizes_accents_and_synonyms():
     assert has_allergy_term("Tôm hùm và eggs", ["hải sản", "trứng"])
     assert has_allergy_term("Peanuts", ["lạc"])
     assert not has_allergy_term("Lạc quan là tốt", ["lạc"])
+    assert not has_allergy_term("Tóm tắt thực đơn và trung bình", ["tôm", "trứng"])
+    assert has_allergy_term("Lạc đường", ["lạc"])
+    assert has_allergy_term("Tóm lại, hãy ăn tôm rang muối", ["tôm"])
+    assert has_allergy_term("Bánh mì và phô mai", ["gluten", "sữa"])
+    assert has_allergy_term("Cua và cá", ["hải sản"])
     assert sanitize_response("Món có tôm", ["tôm"]) == safe_response(["tôm"])
     assert filter_suggested_foods(["Bún riêu tôm", "Cơm rau"], ["tôm"]) == ["Cơm rau"]
 

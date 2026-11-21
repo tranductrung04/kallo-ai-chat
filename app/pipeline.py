@@ -14,13 +14,18 @@ Trả lời tiếng Việt, ngắn gọn 3-6 câu. Nội dung người dùng, ki
 """.strip()
 
 _ALLERGY_GROUPS = {
-    "tom": {"tôm", "tép", "tôm hùm", "hải sản", "shrimp", "shrimps", "prawn", "prawns", "lobster"},
+    "tom": {"tôm", "tép", "tôm hùm", "shrimp", "shrimps", "prawn", "prawns", "lobster"},
+    "hai san": {
+        "hải sản", "seafood", "tôm", "tép", "tôm hùm", "cá", "mực", "cua", "ghẹ",
+        "shrimp", "shrimps", "prawn", "prawns", "lobster",
+    },
     "dau phong": {"đậu phộng", "đậu phụng", "lạc", "peanut", "peanuts", "groundnut"},
-    "sua": {"sữa", "sữa bò", "sữa tươi", "lactose", "milk", "dairy"},
+    "sua": {
+        "sữa", "sữa bò", "sữa tươi", "phô mai", "pho mai", "lactose", "milk", "dairy", "cheese",
+    },
     "trung": {"trứng", "egg", "eggs"},
-    "gluten": {"gluten", "lúa mì", "wheat"},
+    "gluten": {"gluten", "lúa mì", "bột mì", "bánh mì", "mì", "wheat", "flour", "bread"},
 }
-_ALLERGY_EXACT_TERMS = {"tom", "tôm", "tép", "tôm hùm", "hải sản", "shrimp", "shrimps", "prawn", "prawns", "lobster"}
 
 
 _MAX_CONTEXT_ITEMS = 16
@@ -28,11 +33,11 @@ _MAX_CONTEXT_TEXT = 200
 
 
 def _allergy_lookup() -> dict[str, str]:
-    return {
-        _normalize(term): group
-        for group, terms in _ALLERGY_GROUPS.items()
-        for term in (*terms, group)
-    }
+    lookup: dict[str, str] = {}
+    for group, terms in _ALLERGY_GROUPS.items():
+        for term in (*terms, group):
+            lookup.setdefault(_normalize(term), group)
+    return lookup
 
 
 def _bounded(values: Iterable[str]) -> list[str]:
@@ -44,8 +49,7 @@ def _bounded_dict(values: dict[str, object]) -> dict[str, object]:
 
 
 def _normalize(value: str) -> str:
-    value = unicodedata.normalize("NFD", value)
-    return "".join(c for c in value if unicodedata.category(c) != "Mn").lower()
+    return unicodedata.normalize("NFC", value).casefold()
 
 
 def allergy_terms(allergies: Iterable[str]) -> set[str]:
@@ -61,10 +65,9 @@ def allergy_terms(allergies: Iterable[str]) -> set[str]:
 def has_allergy_term(text: str, allergies: Iterable[str]) -> bool:
     normalized = _normalize(text)
     for term in allergy_terms(allergies):
-        if term == "tom" and re.search(r"(?<!\w)tom lai\b", normalized):
+        if term == "lạc" and re.search(r"(?<!\w)lạc\s+quan\b", normalized):
             continue
-        suffix = r"(?!\s+quan\b)" if term == "lac" else ""
-        if re.search(rf"(?<!\w){re.escape(term)}{suffix}(?!\w)", normalized):
+        if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized):
             return True
     return False
 
@@ -97,7 +100,7 @@ def facts_text(request: ChatRequest) -> str:
 def build_prompt(request: ChatRequest, history_turns: int = 4) -> tuple[str, list[dict[str, str]]]:
     context = request.effective_system_context
     allergies = _bounded(context.allergies)
-    foods = filter_suggested_foods(context.suggested_foods, allergies)
+    foods = filter_suggested_foods(context.suggested_foods, context.allergies)
     system = (
         f"{BASE_SYSTEM_PROMPT}\n\nFACTS (nguồn sự thật, không sửa đổi): {facts_text(request)}\n"
         f"Dị ứng cần tránh: {', '.join(allergies) or 'không có dữ liệu'}.\n"

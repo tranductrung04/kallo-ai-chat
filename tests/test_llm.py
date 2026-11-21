@@ -18,7 +18,9 @@ def test_payload_uses_bearer_and_omits_llamacpp_fields(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: async_client(transport=transport, **kwargs))
     client = LLMClient([ProviderConfig("test", "https://llm.test/v1", "secret", "model")])
 
-    assert asyncio.run(client.complete([], "system", 20)) == "Xin chào"
+    completion = asyncio.run(client.complete([], "system", 20))
+    assert completion.content == "Xin chào"
+    assert completion.finish_reason == "stop"
     assert seen["authorization"] == "Bearer secret"
     assert b"cache_prompt" not in seen["json"]
 
@@ -43,5 +45,5 @@ def test_fallback_after_primary_429(monkeypatch):
         max_retries=0,
     )
 
-    assert asyncio.run(client.complete([], "system", 20)) == "fallback"
+    assert asyncio.run(client.complete([], "system", 20)).content == "fallback"
     assert calls == ["primary.test", "fallback.test"]
