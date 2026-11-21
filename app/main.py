@@ -108,6 +108,10 @@ async def chat(request: Request, payload: ChatRequest):
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
+            "message": {"role": "assistant", "content": text},
+            "suggestedFoods": [],
+            "usage": {"promptTokens": None, "completionTokens": None},
+            "modelVersion": config.llm_model,
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": text},
@@ -140,13 +144,13 @@ async def stream_response(payload: ChatRequest, system: str, messages: list[dict
                 finish_reason = chunk.finish_reason
             while "\n" in pending:
                 sentence, pending = pending.split("\n", 1)
-                yield f"event: delta\ndata: {json.dumps({'content': sentence + chr(10)}, ensure_ascii=False)}\n\n"
+                yield f"event: delta\ndata: {json.dumps({'content': sentence + chr(10), 'text': sentence + chr(10)}, ensure_ascii=False)}\n\n"
         if pending:
-            yield f"event: delta\ndata: {json.dumps({'content': pending}, ensure_ascii=False)}\n\n"
+            yield f"event: delta\ndata: {json.dumps({'content': pending, 'text': pending}, ensure_ascii=False)}\n\n"
         text = sanitize_response(buffer, payload.effective_system_context.allergies)
         if text != buffer.strip():
-            yield f"event: replace\ndata: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
-        yield f"event: done\ndata: {json.dumps({'content': text, 'finish_reason': finish_reason}, ensure_ascii=False)}\n\n"
+            yield f"event: replace\ndata: {json.dumps({'content': text, 'text': text}, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason, 'suggestedFoods': [], 'usage': {}, 'modelVersion': config.llm_model}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
     except asyncio.TimeoutError:
         yield f"event: error\ndata: {json.dumps({'code': 'busy', 'message': 'Hệ thống đang bận, thử lại sau.'}, ensure_ascii=False)}\n\n"
