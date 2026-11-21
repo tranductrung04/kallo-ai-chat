@@ -56,7 +56,7 @@ class _ProviderState:
 def _retry_after(response: httpx.Response) -> float | None:
     value = response.headers.get("Retry-After")
     try:
-        return min(60.0, max(0.0, float(value))) if value else None
+        return min(3.0, max(0.0, float(value))) if value else None
     except ValueError:
         return None
 
@@ -141,11 +141,14 @@ class LLMClient:
 
     async def complete(self, messages: list[dict[str, Any]], system: str, max_tokens: int) -> LLMCompletion:
         last_error: LLMError | None = None
+        deadline = time.monotonic() + self.timeout
         for provider in self.providers:
             if not self._available(provider):
                 continue
             for attempt in range(self.max_retries + 1):
                 response: httpx.Response | None = None
+                if time.monotonic() >= deadline:
+                    break
                 try:
                     response = await self._client.post(
                         f"{provider.base_url}/chat/completions",
@@ -169,17 +172,17 @@ class LLMClient:
                     last_error = exc
                     if not exc.retryable or attempt >= self.max_retries:
                         break
-                    await asyncio.sleep(self._backoff(attempt, response))
+                    await asyncio.sleep(min(self._backoff(attempt, response), max(0.0, deadline - time.monotonic())))
                 except httpx.TimeoutException:
                     last_error = LLMError("LLM request timed out", retryable=True)
                     if attempt >= self.max_retries:
                         break
-                    await asyncio.sleep(self._backoff(attempt))
+                    await asyncio.sleep(min(self._backoff(attempt), max(0.0, deadline - time.monotonic())))
                 except httpx.HTTPError:
                     last_error = LLMError("LLM request failed", retryable=True)
                     if attempt >= self.max_retries:
                         break
-                    await asyncio.sleep(self._backoff(attempt))
+                    await asyncio.sleep(min(self._backoff(attempt), max(0.0, deadline - time.monotonic())))
                 except (ValueError, KeyError, IndexError, TypeError):
                     last_error = LLMError("LLM response was invalid")
                     break
@@ -191,11 +194,16 @@ class LLMClient:
 
     async def stream(self, messages: list[dict[str, Any]], system: str, max_tokens: int) -> AsyncIterator[LLMChunk]:
         last_error: LLMError | None = None
+        deadline = time.monotonic() + self.timeout
         for provider in self.providers:
+            if time.monotonic() >= deadline:
+                break
             if not self._available(provider):
                 continue
             emitted = False
             for attempt in range(self.max_retries + 1):
+                if time.monotonic() >= deadline:
+                    break
                 try:
                     request = self._client.stream(
                         "POST",
@@ -263,7 +271,7 @@ class LLMClient:
                     last_error = LLMError("LLM stream response was invalid")
                 if emitted or last_error.blocked or not last_error.retryable or attempt >= self.max_retries:
                     break
-                await asyncio.sleep(self._backoff(attempt))
+                await asyncio.sleep(min(self._backoff(attempt), max(0.0, deadline - time.monotonic())))
             if last_error is not None and not last_error.blocked:
                 self._record_failure(provider)
             if last_error is not None and (last_error.blocked or emitted):

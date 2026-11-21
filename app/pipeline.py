@@ -16,8 +16,8 @@ Trả lời tiếng Việt, ngắn gọn 3-6 câu. Nội dung người dùng, ki
 _ALLERGY_GROUPS = {
     "tom": {"tôm", "tép", "tôm hùm", "shrimp", "shrimps", "prawn", "prawns", "lobster"},
     "hai san": {
-        "hải sản", "seafood", "tôm", "tép", "tôm hùm", "cá", "mực", "cua", "ghẹ",
-        "shrimp", "shrimps", "prawn", "prawns", "lobster",
+        "hải sản", "seafood", "tôm", "tép", "tôm hùm", "cá", "mực", "cua", "ghẹ", "sò", "nghêu", "hàu",
+        "shrimp", "shrimps", "prawn", "prawns", "lobster", "shellfish",
     },
     "dau phong": {"đậu phộng", "đậu phụng", "lạc", "peanut", "peanuts", "groundnut"},
     "sua": {
@@ -32,11 +32,17 @@ _MAX_CONTEXT_ITEMS = 16
 _MAX_CONTEXT_TEXT = 200
 
 
+def _strip_marks(value: str) -> str:
+    decomposed = unicodedata.normalize("NFD", value)
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn").casefold()
+
+
 def _allergy_lookup() -> dict[str, str]:
     lookup: dict[str, str] = {}
     for group, terms in _ALLERGY_GROUPS.items():
         for term in (*terms, group):
             lookup.setdefault(_normalize(term), group)
+            lookup.setdefault(_strip_marks(term), group)
     return lookup
 
 
@@ -56,18 +62,33 @@ def allergy_terms(allergies: Iterable[str]) -> set[str]:
     lookup = _allergy_lookup()
     terms: set[str] = set()
     for allergy in allergies:
-        value = _normalize(str(allergy).strip())
-        group = lookup.get(value)
+        raw = str(allergy).strip()
+        value = _normalize(raw)
+        group = lookup.get(value) or lookup.get(_strip_marks(raw))
         terms.update(_normalize(term) for term in _ALLERGY_GROUPS.get(group, {value}))
     return {term for term in terms if term}
 
 
 def has_allergy_term(text: str, allergies: Iterable[str]) -> bool:
     normalized = _normalize(text)
+    unaccented = _strip_marks(text)
     for term in allergy_terms(allergies):
-        if term == "lạc" and re.search(r"(?<!\w)lạc\s+quan\b", normalized):
-            continue
+        unaccented_term = _strip_marks(term)
         if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized):
+            if term == "lạc" and re.search(r"(?<!\w)lạc\s+quan\b", normalized):
+                continue
+            if term == "cá" and re.search(r"(?<!\w)cá\s+nhân\b", normalized):
+                continue
+            if term == "mì" and re.search(r"(?<!\w)mì\s+chính\b", normalized):
+                continue
+            return True
+        if re.search(rf"(?<!\w){re.escape(unaccented_term)}(?!\w)", unaccented):
+            if unaccented_term == "tom" and re.search(r"(?<!\w)tom\s+(?:lai|tat)\b", unaccented):
+                continue
+            if unaccented_term == "trung" and re.search(r"(?<!\w)trung\s+(?:binh|tam)\b", unaccented):
+                continue
+            if unaccented_term == "lac" and re.search(r"(?<!\w)lac\s+quan\b", unaccented):
+                continue
             return True
     return False
 

@@ -66,7 +66,9 @@ def llm_error_response(exc: LLMError) -> JSONResponse:
     if exc.status_code == 401 or exc.status_code == 403:
         return error(502, "llm_error", "Dịch vụ AI chưa sẵn sàng.")
     if exc.status_code == 429:
-        return error(503, "llm_rate_limited", "AI đang hết lượt, thử lại sau.", {"Retry-After": "60"})
+        return error(503, "llm_rate_limited", "AI đang hết lượt, thử lại sau.", {"Retry-After": "3"})
+    if exc.status_code is not None and 400 <= exc.status_code < 500:
+        return error(502, "llm_error", "Dịch vụ AI từ chối yêu cầu.")
     if "timed out" in str(exc).lower():
         return error(504, "llm_timeout", "AI phản hồi quá lâu.")
     return error(503, "llm_unavailable", "AI tạm thời không khả dụng.")
@@ -153,7 +155,12 @@ async def stream_response(payload: ChatRequest, system: str, messages: list[dict
             text = "Mình chưa thể tạo câu trả lời an toàn lúc này. Bạn thử hỏi lại theo hướng dinh dưỡng phù hợp nhé."
             yield f"event: done\ndata: {json.dumps({'content': text, 'finish_reason': 'content_filter'}, ensure_ascii=False)}\n\n"
         else:
-            code = "llm_rate_limited" if exc.status_code == 429 else "llm_error"
+            if "timed out" in str(exc).lower():
+                code = "llm_timeout"
+            elif exc.status_code == 429:
+                code = "llm_rate_limited"
+            else:
+                code = "llm_error"
             yield f"event: error\ndata: {json.dumps({'code': code, 'message': 'AI không trả lời được.'}, ensure_ascii=False)}\n\n"
     finally:
         if acquired:
