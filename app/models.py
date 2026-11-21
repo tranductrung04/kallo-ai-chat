@@ -10,12 +10,14 @@ def alias(name: str) -> str:
         "calorie_goal": "calorieGoal",
         "consumed_kcal": "consumedKcal",
         "suggested_foods": "suggestedFoods",
+        "daily_kcal": "dailyKcal",
+        "calories_in": "caloriesIn",
     }.get(name, name)
 
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
-    content: str = Field(min_length=1, max_length=2000)
+    content: str = Field(min_length=1, max_length=12000)
 
 
 class ChatOptions(BaseModel):
@@ -23,6 +25,24 @@ class ChatOptions(BaseModel):
 
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     stream: bool = False
+
+
+class ContextTargets(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, alias_generator=alias)
+
+    daily_kcal: float | None = None
+    calorie_goal: float | None = None
+    tdee: float | None = None
+
+
+class ContextToday(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, alias_generator=alias)
+
+    consumed_kcal: float | None = None
+    calories_in: float | None = None
+    protein: float | None = None
+    carbs: float | None = None
+    fat: float | None = None
 
 
 class SystemContext(BaseModel):
@@ -34,8 +54,8 @@ class SystemContext(BaseModel):
     suggested_foods: list[str] = Field(default_factory=list, max_length=32)
     facts: dict[str, Any] = Field(default_factory=dict)
     profile: dict[str, Any] = Field(default_factory=dict)
-    targets: dict[str, Any] = Field(default_factory=dict)
-    today: dict[str, Any] = Field(default_factory=dict)
+    targets: ContextTargets = Field(default_factory=ContextTargets)
+    today: ContextToday = Field(default_factory=ContextToday)
 
 
 class ChatRequest(BaseModel):
@@ -49,9 +69,12 @@ class ChatRequest(BaseModel):
 
     @field_validator("messages")
     @classmethod
-    def last_message_must_be_user(cls, value: list[ChatMessage]) -> list[ChatMessage]:
+    def validate_messages(cls, value: list[ChatMessage]) -> list[ChatMessage]:
         if value[-1].role != "user":
             raise ValueError("last message must have role user")
+        for message in value:
+            if message.role == "user" and len(message.content) > 2000:
+                raise ValueError("user message exceeds 2000 characters")
         return value
 
     @property
@@ -66,9 +89,13 @@ class ChatRequest(BaseModel):
     def effective_system_context(self) -> SystemContext:
         context = self.system_context.model_copy(deep=True)
         if context.calorie_goal is None:
-            context.calorie_goal = context.targets.get("dailyKcal") or context.targets.get("calorieGoal")
+            context.calorie_goal = context.targets.daily_kcal
+            if context.calorie_goal is None:
+                context.calorie_goal = context.targets.calorie_goal
         if context.consumed_kcal is None:
-            context.consumed_kcal = context.today.get("consumedKcal")
+            context.consumed_kcal = context.today.consumed_kcal
+            if context.consumed_kcal is None:
+                context.consumed_kcal = context.today.calories_in
         return context
 
 

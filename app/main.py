@@ -45,6 +45,8 @@ def authorized(api_key: str | None) -> bool:
 
 
 def llm_error_response(exc: LLMError) -> JSONResponse:
+    if exc.blocked:
+        return JSONResponse({"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Mình chưa thể tạo câu trả lời an toàn lúc này. Bạn thử hỏi lại theo hướng dinh dưỡng phù hợp nhé."}, "finish_reason": "content_filter"}]})
     if exc.status_code == 401 or exc.status_code == 403:
         return error(502, "llm_error", "Dịch vụ AI chưa sẵn sàng.")
     if exc.status_code == 429:
@@ -70,20 +72,19 @@ async def ready() -> JSONResponse:
 async def chat(request: Request, payload: ChatRequest):
     if not authorized(request.headers.get("X-Internal-Api-Key")):
         return error(401, "unauthorized", "API key không hợp lệ.")
+    acquired = False
     try:
         await asyncio.wait_for(generation_lock.acquire(), timeout=config.max_queue_wait)
-    except TimeoutError:
-        return error(503, "busy", "AI đang bận, thử lại sau.", {"Retry-After": str(int(config.max_queue_wait))})
-    try:
+        acquired = True
         system, messages = build_prompt(payload, config.history_turns)
         if payload.effective_stream:
             return StreamingResponse(stream_response(payload, system, messages), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         text = sanitize_response(await llm.complete(messages, system, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens)), payload.effective_system_context.allergies)
-        return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]}
+        return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": llm.last_finish_reason}]}
     except LLMError as exc:
         return llm_error_response(exc)
     finally:
-        if not payload.effective_stream:
+        if acquired and not payload.effective_stream:
             generation_lock.release()
 
 
@@ -104,10 +105,14 @@ async def stream_response(payload: ChatRequest, system: str, messages: list[dict
         text = sanitize_response(buffer, payload.effective_system_context.allergies)
         if text != buffer.strip():
             yield f"event: replace\ndata: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
-        yield f"event: done\ndata: {json.dumps({'content': text}, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'content': text, 'finish_reason': llm.last_finish_reason}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
     except LLMError as exc:
-        code = "llm_rate_limited" if exc.status_code == 429 else "llm_error"
-        yield f"event: error\ndata: {json.dumps({'code': code, 'message': 'AI không trả lời được.'}, ensure_ascii=False)}\n\n"
+        if exc.blocked:
+            text = "Mình chưa thể tạo câu trả lời an toàn lúc này. Bạn thử hỏi lại theo hướng dinh dưỡng phù hợp nhé."
+            yield f"event: done\ndata: {json.dumps({'content': text, 'finish_reason': 'content_filter'}, ensure_ascii=False)}\n\n"
+        else:
+            code = "llm_rate_limited" if exc.status_code == 429 else "llm_error"
+            yield f"event: error\ndata: {json.dumps({'code': code, 'message': 'AI không trả lời được.'}, ensure_ascii=False)}\n\n"
     finally:
         generation_lock.release()

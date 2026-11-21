@@ -16,6 +16,9 @@ def test_prompt_keeps_facts_and_last_user_message():
 def test_allergy_filter_normalizes_accents_and_synonyms():
     assert has_allergy_term("Món có shrimp", ["tôm"])
     assert not has_allergy_term("Tóm lại, nên ăn nhẹ", ["tôm"])
+    assert has_allergy_term("Tôm hùm và eggs", ["hải sản", "trứng"])
+    assert has_allergy_term("Peanuts", ["lạc"])
+    assert not has_allergy_term("Lạc quan là tốt", ["lạc"])
     assert sanitize_response("Món có tôm", ["tôm"]) == safe_response(["tôm"])
     assert filter_suggested_foods(["Bún riêu tôm", "Cơm rau"], ["tôm"]) == ["Cơm rau"]
 

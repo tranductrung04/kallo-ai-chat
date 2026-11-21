@@ -11,10 +11,18 @@ import httpx
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, *, status_code: int | None = None, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        blocked: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.blocked = blocked
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,7 @@ class LLMClient:
         self.hard_max_tokens = hard_max_tokens
         self._states = {provider.name: _ProviderState() for provider in providers}
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=connect_timeout))
+        self.last_finish_reason = "stop"
 
     def _payload(self, provider: ProviderConfig, messages: list[dict[str, Any]], system: str, max_tokens: int, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -96,7 +105,7 @@ class LLMClient:
     def _clean_content(content: object) -> str:
         if not isinstance(content, str):
             return ""
-        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+        return re.sub(r"<think>.*?(?:</think>|$)", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
 
     async def complete(self, messages: list[dict[str, Any]], system: str, max_tokens: int) -> str:
         last_error: LLMError | None = None
@@ -117,9 +126,10 @@ class LLMClient:
                         raise LLMError("provider authentication failed", status_code=response.status_code)
                     response.raise_for_status()
                     data = response.json()
-                    finish_reason = data["choices"][0].get("finish_reason")
+                    finish_reason = data["choices"][0].get("finish_reason") or "stop"
+                    self.last_finish_reason = finish_reason
                     if finish_reason == "content_filter":
-                        raise LLMError("provider content filter")
+                        raise LLMError("provider content filter", blocked=True)
                     content = self._clean_content(data["choices"][0]["message"].get("content"))
                     if not content:
                         raise LLMError("empty LLM response")
@@ -141,7 +151,8 @@ class LLMClient:
                     if attempt >= self.max_retries:
                         break
                     await asyncio.sleep(min(2 ** attempt, 8) + random.random())
-            self._record_failure(provider)
+            if last_error is None or not last_error.blocked:
+                self._record_failure(provider)
         raise last_error or LLMError("no LLM provider available", retryable=True)
 
     async def stream(self, messages: list[dict[str, Any]], system: str, max_tokens: int) -> AsyncIterator[str]:
@@ -178,14 +189,17 @@ class LLMClient:
                         choices = data.get("choices") or []
                         if not choices:
                             continue
-                        if choices[0].get("finish_reason") == "content_filter":
-                            raise LLMError("provider content filter")
+                        finish_reason = choices[0].get("finish_reason")
+                        if finish_reason:
+                            self.last_finish_reason = finish_reason
+                        if finish_reason == "content_filter":
+                            raise LLMError("provider content filter", blocked=True)
                         delta = (choices[0].get("delta") or {}).get("content")
                         if delta:
                             emitted = True
                             yield delta
                     if not emitted:
-                        raise LLMError("empty LLM stream")
+                        raise LLMError("empty LLM stream", blocked=True)
                     self._record_success(provider)
                     return
             except (LLMError, httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
