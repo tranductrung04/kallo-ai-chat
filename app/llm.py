@@ -45,6 +45,46 @@ class LLMCompletion:
 class LLMChunk:
     content: str
     finish_reason: str | None = None
+    final_content: str | None = None
+
+
+class _ThinkFilter:
+    def __init__(self) -> None:
+        self._pending = ""
+        self._thinking = False
+
+    def feed(self, value: str) -> str:
+        self._pending += value
+        output: list[str] = []
+        while self._pending:
+            if self._thinking:
+                end = re.search(r"</think>", self._pending, re.IGNORECASE)
+                if not end:
+                    self._pending = self._pending[-8:]
+                    break
+                self._pending = self._pending[end.end():]
+                self._thinking = False
+                continue
+            start = re.search(r"<think>", self._pending, re.IGNORECASE)
+            if start:
+                output.append(self._pending[:start.start()])
+                self._pending = self._pending[start.end():]
+                self._thinking = True
+                continue
+            keep = min(len(self._pending), 7)
+            if len(self._pending) > keep:
+                output.append(self._pending[:-keep])
+                self._pending = self._pending[-keep:]
+            break
+        return "".join(output)
+
+    def finish(self) -> str:
+        if self._thinking:
+            self._pending = ""
+            return ""
+        value = self._pending
+        self._pending = ""
+        return value
 
 
 @dataclass
@@ -119,7 +159,8 @@ class LLMClient:
     def _clean_content(content: object) -> str:
         if not isinstance(content, str):
             return ""
-        return re.sub(r"<think>.*?(?:</think>|$)", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+        cleaner = _ThinkFilter()
+        return (cleaner.feed(content) + cleaner.finish()).strip()
 
     @staticmethod
     def _response_error(response: httpx.Response) -> LLMError | None:
@@ -216,6 +257,8 @@ class LLMClient:
                         if provider_error:
                             raise provider_error
                         finish_reason = "stop"
+                        final_content: str | None = None
+                        think_filter = _ThinkFilter()
                         lines = response.aiter_lines().__aiter__()
                         first_token = True
                         while True:
@@ -246,15 +289,23 @@ class LLMClient:
                                 finish_reason = reason
                             if reason == "content_filter":
                                 raise LLMError("provider content filter", blocked=True)
+                            message = choice.get("message") or {}
+                            final_content = message.get("content") if isinstance(message.get("content"), str) else final_content
                             delta = (choice.get("delta") or {}).get("content")
                             if delta:
-                                emitted = True
-                                first_token = False
-                                yield LLMChunk(delta)
-                        if not emitted:
+                                clean_delta = think_filter.feed(delta)
+                                if clean_delta:
+                                    emitted = True
+                                    first_token = False
+                                    yield LLMChunk(clean_delta)
+                        trailing = think_filter.finish()
+                        if trailing:
+                            emitted = True
+                            yield LLMChunk(trailing)
+                        if not emitted and not final_content:
                             raise LLMError("empty LLM stream")
                         self._record_success(provider)
-                        yield LLMChunk("", finish_reason)
+                        yield LLMChunk("", finish_reason, self._clean_content(final_content) if final_content else None)
                         return
                 except asyncio.TimeoutError:
                     last_error = LLMError(

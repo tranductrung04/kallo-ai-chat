@@ -27,7 +27,7 @@ Optional fallback: `LLM_FALLBACK_BASE_URL`, `LLM_FALLBACK_API_KEY`, `LLM_FALLBAC
     "calorieGoal": 1800,
     "consumedKcal": 1200,
     "allergies": ["tôm"],
-    "suggestedFoods": ["cơm gạo lứt", "ức gà"]
+    "suggestedFoods": [{"name": "cơm gạo lứt", "kcal": 320}, {"name": "ức gà", "kcal": 250}]
   },
   "stream": false
 }

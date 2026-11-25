@@ -54,6 +54,17 @@ def _bounded_dict(values: dict[str, object]) -> dict[str, object]:
     return {str(key)[:64]: str(value)[:_MAX_CONTEXT_TEXT] for key, value in list(values.items())[:_MAX_CONTEXT_ITEMS]}
 
 
+_PROFILE_FIELDS = {"heightCm", "weightKg", "goal", "ageYears", "sex", "activityLevel"}
+
+
+def _safe_profile(values: dict[str, object]) -> dict[str, object]:
+    return {
+        key: str(values[key])[:_MAX_CONTEXT_TEXT]
+        for key in _PROFILE_FIELDS
+        if key in values and values[key] is not None
+    }
+
+
 def _normalize(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
@@ -93,15 +104,39 @@ def has_allergy_term(text: str, allergies: Iterable[str]) -> bool:
     return False
 
 
-def filter_suggested_foods(foods: Iterable[str], allergies: Iterable[str]) -> list[str]:
-    return [food for food in _bounded(foods) if not has_allergy_term(food, allergies)]
+def normalize_suggested_foods(foods: Iterable[object], allergies: Iterable[str]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for food in list(foods)[:_MAX_CONTEXT_ITEMS]:
+        if isinstance(food, str):
+            name, kcal = food[:_MAX_CONTEXT_TEXT], None
+        elif isinstance(food, dict):
+            name, kcal = food.get("name"), food.get("kcal")
+            if not isinstance(name, str):
+                continue
+            name = name[:_MAX_CONTEXT_TEXT]
+        else:
+            name, kcal = getattr(food, "name", None), getattr(food, "kcal", None)
+            if not isinstance(name, str):
+                continue
+        if has_allergy_term(name, allergies):
+            continue
+        item: dict[str, object] = {"name": name}
+        if isinstance(kcal, (int, float)) and kcal >= 0:
+            item["kcal"] = kcal
+        normalized.append(item)
+    return normalized
+
+
+def filter_suggested_foods(foods: Iterable[object], allergies: Iterable[str]) -> list[str]:
+    return [food["name"] for food in normalize_suggested_foods(foods, allergies)]
 
 
 def facts_text(request: ChatRequest) -> str:
     context = request.effective_system_context
     facts = _bounded_dict(context.facts)
-    if context.profile:
-        facts["profile"] = _bounded_dict(context.profile)
+    profile = _safe_profile(context.profile)
+    if profile:
+        facts["profile"] = profile
     if context.targets.model_dump(exclude_none=True):
         facts["targets"] = context.targets.model_dump(exclude_none=True, by_alias=True)
     if context.today.model_dump(exclude_none=True):
@@ -121,11 +156,12 @@ def facts_text(request: ChatRequest) -> str:
 def build_prompt(request: ChatRequest, history_turns: int = 4) -> tuple[str, list[dict[str, str]]]:
     context = request.effective_system_context
     allergies = _bounded(context.allergies)
-    foods = filter_suggested_foods(context.suggested_foods, context.allergies)
+    foods = normalize_suggested_foods(context.suggested_foods, context.allergies)
+    food_text = json.dumps(foods, ensure_ascii=False, separators=(",", ":"))
     system = (
         f"{BASE_SYSTEM_PROMPT}\n\nFACTS (nguồn sự thật, không sửa đổi): {facts_text(request)}\n"
-        f"Dị ứng cần tránh: {', '.join(allergies) or 'không có dữ liệu'}.\n"
-        f"Món được phép gợi ý: {', '.join(foods) or 'không có dữ liệu'}."
+        f"Dị ứng cần tránh: {json.dumps(allergies, ensure_ascii=False)}.\n"
+        f"Món được phép gợi ý (chỉ chọn trong danh sách, dùng đúng kcal): {food_text or 'không có dữ liệu'}."
     )
     history = [
         {"role": message.role, "content": message.content}

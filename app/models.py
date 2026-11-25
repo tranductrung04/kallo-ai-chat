@@ -12,6 +12,14 @@ def alias(name: str) -> str:
         "suggested_foods": "suggestedFoods",
         "daily_kcal": "dailyKcal",
         "calories_in": "caloriesIn",
+        "calorie_goal": "calorieGoal",
+        "meals_logged": "mealsLogged",
+        "water_ml": "waterMl",
+        "water_goal_ml": "waterGoalMl",
+        "steps": "steps",
+        "calories_burned": "caloriesBurned",
+        "name": "name",
+        "kcal": "kcal",
     }.get(name, name)
 
 
@@ -38,11 +46,24 @@ class ContextTargets(BaseModel):
 class ContextToday(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True, alias_generator=alias)
 
+    calorie_goal: float | None = None
     consumed_kcal: float | None = None
     calories_in: float | None = None
-    protein: float | None = None
-    carbs: float | None = None
-    fat: float | None = None
+    meals_logged: int | None = Field(default=None, ge=0)
+    water_ml: float | None = Field(default=None, ge=0)
+    water_goal_ml: float | None = Field(default=None, ge=0)
+    steps: int | None = Field(default=None, ge=0)
+    calories_burned: float | None = Field(default=None, ge=0)
+    protein: float | None = Field(default=None, ge=0)
+    carbs: float | None = Field(default=None, ge=0)
+    fat: float | None = Field(default=None, ge=0)
+
+
+class SuggestedFood(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, alias_generator=alias)
+
+    name: str = Field(min_length=1, max_length=200)
+    kcal: float = Field(ge=0)
 
 
 class SystemContext(BaseModel):
@@ -51,7 +72,7 @@ class SystemContext(BaseModel):
     calorie_goal: float | None = None
     consumed_kcal: float | None = None
     allergies: list[str] = Field(default_factory=list, max_length=16)
-    suggested_foods: list[str] = Field(default_factory=list, max_length=32)
+    suggested_foods: list[str | SuggestedFood] = Field(default_factory=list, max_length=32)
     facts: dict[str, Any] = Field(default_factory=dict)
     profile: dict[str, Any] = Field(default_factory=dict)
     targets: ContextTargets = Field(default_factory=ContextTargets)
@@ -89,7 +110,9 @@ class ChatRequest(BaseModel):
     def effective_system_context(self) -> SystemContext:
         context = self.system_context.model_copy(deep=True)
         if context.calorie_goal is None:
-            context.calorie_goal = context.targets.daily_kcal
+            context.calorie_goal = context.today.calorie_goal
+            if context.calorie_goal is None:
+                context.calorie_goal = context.targets.daily_kcal
             if context.calorie_goal is None:
                 context.calorie_goal = context.targets.calorie_goal
         if context.consumed_kcal is None:

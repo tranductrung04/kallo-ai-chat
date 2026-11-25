@@ -11,7 +11,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import Settings, settings
 from .llm import LLMClient, LLMError, ProviderConfig
 from .models import ChatRequest, ErrorBody
-from .pipeline import build_prompt, clamp_max_tokens, sanitize_response
+from .pipeline import build_prompt, clamp_max_tokens, normalize_suggested_foods, sanitize_response
+from .quota import QuotaLimiter, estimate_tokens
+from .safety import safety_redirect
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -29,6 +31,7 @@ if config.fallback_base_url and config.fallback_api_key and config.fallback_mode
     providers.append(ProviderConfig("fallback", config.fallback_base_url, config.fallback_api_key, config.fallback_model, config.fallback_reasoning_effort, config.fallback_extra_body))
 llm = LLMClient(providers, connect_timeout=config.llm_connect_timeout, first_token_timeout=config.llm_first_token_timeout, timeout=config.llm_timeout, max_retries=config.llm_max_retries, hard_max_tokens=config.hard_max_tokens)
 generation_lock = asyncio.Semaphore(config.max_concurrent_generations)
+quota = QuotaLimiter(config.rpm_limit, config.tpm_limit, config.daily_request_budget)
 
 
 @asynccontextmanager
@@ -88,10 +91,23 @@ async def ready() -> JSONResponse:
 
 @app.post("/v1/chat")
 async def chat(request: Request, payload: ChatRequest):
+    redirect = safety_redirect(payload.messages[-1].content)
+    if redirect:
+        text, finish_reason = redirect
+        if payload.effective_stream:
+            async def redirect_stream() -> AsyncIterator[str]:
+                yield f"event: done\\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason}, ensure_ascii=False)}\\n\\n"
+                yield "data: [DONE]\\n\\n"
+            return StreamingResponse(redirect_stream(), media_type="text/event-stream")
+        return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "message": {"role": "assistant", "content": text}, "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}]}
     system, messages = build_prompt(payload, config.history_turns)
+    estimated = estimate_tokens(system, messages, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens))
+    retry_after = quota.try_acquire(estimated)
+    if retry_after is not None:
+        return error(503, "llm_rate_limited", "AI đang hết lượt, thử lại sau.", {"Retry-After": str(max(1, int(retry_after)))})
     if payload.effective_stream:
         return StreamingResponse(
-            stream_response(payload, system, messages),
+            stream_response(request, payload, system, messages),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -105,11 +121,12 @@ async def chat(request: Request, payload: ChatRequest):
             clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens),
         )
         text = sanitize_response(completion.content, payload.effective_system_context.allergies)
+        suggested_foods = normalize_suggested_foods(payload.effective_system_context.suggested_foods, payload.effective_system_context.allergies)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "message": {"role": "assistant", "content": text},
-            "suggestedFoods": [],
+            "suggestedFoods": suggested_foods,
             "usage": {"promptTokens": None, "completionTokens": None},
             "modelVersion": config.llm_model,
             "choices": [{
@@ -127,7 +144,7 @@ async def chat(request: Request, payload: ChatRequest):
             generation_lock.release()
 
 
-async def stream_response(payload: ChatRequest, system: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+async def stream_response(request: Request, payload: ChatRequest, system: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
     acquired = False
     try:
         await asyncio.wait_for(generation_lock.acquire(), timeout=config.max_queue_wait)
@@ -136,21 +153,26 @@ async def stream_response(payload: ChatRequest, system: str, messages: list[dict
         buffer = ""
         pending = ""
         finish_reason = "stop"
+        final_content = None
         async for chunk in llm.stream(messages, system, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens)):
+            if await request.is_disconnected():
+                return
             if chunk.content:
                 buffer += chunk.content
                 pending += chunk.content
+            if chunk.final_content is not None:
+                final_content = chunk.final_content
             if chunk.finish_reason:
                 finish_reason = chunk.finish_reason
-            while "\n" in pending:
-                sentence, pending = pending.split("\n", 1)
-                yield f"event: delta\ndata: {json.dumps({'content': sentence + chr(10), 'text': sentence + chr(10)}, ensure_ascii=False)}\n\n"
+            if len(pending) >= 32:
+                yield f"event: delta\ndata: {json.dumps({'content': pending, 'text': pending}, ensure_ascii=False)}\n\n"
+                pending = ""
         if pending:
             yield f"event: delta\ndata: {json.dumps({'content': pending, 'text': pending}, ensure_ascii=False)}\n\n"
-        text = sanitize_response(buffer, payload.effective_system_context.allergies)
+        text = sanitize_response(final_content if final_content is not None else buffer, payload.effective_system_context.allergies)
         if text != buffer.strip():
             yield f"event: replace\ndata: {json.dumps({'content': text, 'text': text}, ensure_ascii=False)}\n\n"
-        yield f"event: done\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason, 'suggestedFoods': [], 'usage': {}, 'modelVersion': config.llm_model}, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason, 'suggestedFoods': normalize_suggested_foods(payload.effective_system_context.suggested_foods, payload.effective_system_context.allergies), 'usage': {}, 'modelVersion': config.llm_model}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
     except asyncio.TimeoutError:
         yield f"event: error\ndata: {json.dumps({'code': 'busy', 'message': 'Hệ thống đang bận, thử lại sau.'}, ensure_ascii=False)}\n\n"
