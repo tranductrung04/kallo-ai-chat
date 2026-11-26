@@ -42,3 +42,25 @@ def test_backend_contract_options_and_nested_context():
     assert request.effective_max_tokens == 128
     system, _ = build_prompt(request)
     assert '"remainingKcal": 600' in system
+
+
+def test_seed_group_and_code_allergies_block_dishes_without_false_positives():
+    seed_allergies = ["Giáp xác (Tôm, Cua, Ghẹ)", "Đậu phụng (Lạc)", "Sữa và Sản phẩm từ sữa"]
+    assert has_allergy_term("bún riêu tôm", seed_allergies)
+    assert has_allergy_term("đậu phộng rang", seed_allergies)
+    assert has_allergy_term("cua rang me", seed_allergies)
+    assert has_allergy_term("Bánh phô mai nướng", seed_allergies)
+    assert not has_allergy_term("Mục tiêu của bạn còn 500 kcal, tất cả các món gà đều ổn.", seed_allergies)
+    assert not has_allergy_term("Bạn có thể chỉnh sửa một số bữa ăn.", seed_allergies)
+
+    code_allergies = ["CRUSTACEANS", "PEANUT", "DAIRY", "SESAME"]
+    assert has_allergy_term("bún riêu tôm", code_allergies)
+    assert has_allergy_term("cua rang me", code_allergies)
+    assert has_allergy_term("đậu phộng rang", code_allergies)
+    assert has_allergy_term("sữa tươi không đường", code_allergies)
+    assert not has_allergy_term("cá hồi áp chảo", ["CRUSTACEANS"])
+    assert not has_allergy_term("vịt rang me", ["SESAME"])
+    assert has_allergy_term("gà rắc mè đen", ["SESAME"])
+
+    object_allergies = [{"code": "CRUSTACEANS", "name": "Giáp xác (Tôm, Cua, Ghẹ)"}]
+    assert has_allergy_term("cua rang me", object_allergies)

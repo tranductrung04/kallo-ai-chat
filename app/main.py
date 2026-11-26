@@ -96,9 +96,13 @@ async def chat(request: Request, payload: ChatRequest):
         text, finish_reason = redirect
         if payload.effective_stream:
             async def redirect_stream() -> AsyncIterator[str]:
-                yield f"event: done\\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason}, ensure_ascii=False)}\\n\\n"
-                yield "data: [DONE]\\n\\n"
-            return StreamingResponse(redirect_stream(), media_type="text/event-stream")
+                yield f"event: done\ndata: {json.dumps({'content': text, 'text': text, 'finish_reason': finish_reason}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(
+                redirect_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "message": {"role": "assistant", "content": text}, "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}]}
     system, messages = build_prompt(payload, config.history_turns)
     estimated = estimate_tokens(system, messages, clamp_max_tokens(payload.effective_max_tokens, config.max_tokens, config.hard_max_tokens))

@@ -16,7 +16,7 @@ _PATTERNS = {
 
 
 def _fold(value: str) -> str:
-    decomposed = unicodedata.normalize("NFD", value.casefold())
+    decomposed = unicodedata.normalize("NFD", value.casefold().replace("đ", "d"))
     return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
