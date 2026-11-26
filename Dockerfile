@@ -8,6 +8,7 @@ ENV PATH="/home/user/.local/bin:$PATH"
 COPY --chown=user pyproject.toml .
 RUN pip install --user --no-cache-dir .
 COPY --chown=user . .
+RUN sed -i 's/\r$//' scripts/entrypoint.sh
 
 EXPOSE 7860
 CMD ["bash", "scripts/entrypoint.sh"]
